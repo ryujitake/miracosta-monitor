@@ -24,11 +24,9 @@ jobs:
       - name: Install dependencies
         run: npm install
 
-      - name: Install Chromium
-        run: npx playwright install --with-deps chromium
-
-      - name: Check MiraCosta
+      - name: Check MiraCosta via TinyFish
         env:
+          TINYFISH_API_KEY: ${{ secrets.TINYFISH_API_KEY }}
           MAIL_USERNAME: ${{ secrets.MAIL_USERNAME }}
           MAIL_PASSWORD: ${{ secrets.MAIL_PASSWORD }}
           MAIL_TO: ${{ secrets.MAIL_TO }}
