@@ -9,7 +9,7 @@ async function notify(message){
   await transporter.sendMail({from:user,to,subject:"ミラコスタ空室検知",text:message});
 }
 
-async function main(){
+async function runTinyFish(){
   const key=process.env.TINYFISH_API_KEY;
   if(!key) throw new Error("TINYFISH_API_KEY secret is not configured.");
 
@@ -20,12 +20,12 @@ async function main(){
     "Hotel: Tokyo DisneySea Hotel MiraCosta.",
     "Only inspect the Porto Paradiso Side (ポルト・パラディーゾ・サイド).",
     "Do NOT book, reserve, click a purchase/booking confirmation, or change any reservation.",
-    "Return ONLY JSON with these fields: available (boolean), status (string), evidence (string), checked_at (string).",
+    "Return ONLY JSON with fields available (boolean), status (string), evidence (string), checked_at (string).",
     "available=true only if a room in Porto Paradiso Side is clearly bookable/available for these exact search conditions.",
     "If full, unavailable, sold out, or unclear, set available=false."
   ].join(" ");
 
-  const response=await fetch("https://agent.tinyfish.ai/v1/automation/run",{
+  const response=await fetch("https://agent.tinyfish.ai/v1/automation/run-sse",{
     method:"POST",
     headers:{"X-API-Key":key,"Content-Type":"application/json"},
     body:JSON.stringify({
@@ -37,18 +37,44 @@ async function main(){
     signal:AbortSignal.timeout(420000)
   });
 
-  const raw=await response.text();
-  if(!response.ok) throw new Error(`TinyFish HTTP ${response.status}: ${raw.slice(0,1000)}`);
-  let data;
-  try{data=JSON.parse(raw);}catch{throw new Error("TinyFish returned non-JSON: "+raw.slice(0,1000));}
+  if(!response.ok) throw new Error(`TinyFish HTTP ${response.status}: ${(await response.text()).slice(0,1000)}`);
+  if(!response.body) throw new Error("TinyFish returned no response body.");
 
-  console.log(JSON.stringify(data,null,2));
-  if(data.status!=="COMPLETED") throw new Error("TinyFish run did not complete: "+(data.error||data.status));
+  const reader=response.body.getReader();
+  const decoder=new TextDecoder();
+  let buffer="";
+  let finalEvent=null;
 
-  let result=data.result;
+  while(true){
+    const {done,value}=await reader.read();
+    if(done) break;
+    buffer += decoder.decode(value,{stream:true});
+    const lines=buffer.split(/\r?\n/);
+    buffer=lines.pop()||"";
+    for(const line of lines){
+      if(!line.startsWith("data: ")) continue;
+      const payload=line.slice(6).trim();
+      if(!payload) continue;
+      try{
+        const event=JSON.parse(payload);
+        console.log(JSON.stringify(event));
+        if(["COMPLETED","FAILED","CANCELLED"].includes(event.status)) finalEvent=event;
+      }catch{}
+    }
+  }
+
+  if(!finalEvent) throw new Error("TinyFish stream ended without a terminal event.");
+  if(finalEvent.status!=="COMPLETED") throw new Error("TinyFish run did not complete: "+JSON.stringify(finalEvent).slice(0,2000));
+
+  let result=finalEvent.result ?? finalEvent.data?.result;
   if(typeof result==="string"){try{result=JSON.parse(result);}catch{}}
-  const available=result?.available===true;
-  if(available){
+  return result;
+}
+
+async function main(){
+  const result=await runTinyFish();
+  console.log("FINAL_RESULT",JSON.stringify(result,null,2));
+  if(result?.available===true){
     await notify(
       "東京ディズニーシー・ホテルミラコスタに空室候補を検知しました。\n"+
       "日付: 2027/1/17\n"+
