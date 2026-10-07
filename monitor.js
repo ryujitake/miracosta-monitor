@@ -1,36 +1,55 @@
 const { chromium } = require("playwright");
+const nodemailer = require("nodemailer");
 
 const URL = "https://reserve.tokyodisneyresort.jp/hotel/list/?showWay=&roomsNum=1&adultNum=2&childNum=2&stayingDays=1&useDate=20270117&cpListStr=&childAgeBedInform=01U_3%7C07U_3%7C&searchHotelCD=DHM&searchHotelDiv=&hotelName=&searchHotelName=&searchLayer=&searchRoomName=&hotelSearchDetail=true&detailOpenFlg=0&checkPointStr=&hotelChangeFlg=false&removeSessionFlg=true&returnFlg=false&hotelShowFlg=&displayType=data-hotel&reservationStatus=1";
 const TARGET_LABEL = "ポルト・パラディーゾ・サイド";
 
-function normalize(s) { return s.replace(/\\s+/g, " ").trim(); }
+function normalize(s) { return s.replace(/\s+/g, " ").trim(); }
 
 async function notify(message) {
-  const topic = process.env.NTFY_TOPIC;
-  if (!topic) {
-    console.log("NTFY_TOPIC is not configured. Availability detected:");
-    console.log(message);
-    return;
-  }
-  const response = await fetch("https://ntfy.sh/" + encodeURIComponent(topic), {
-    method: "POST",
-    headers: { "Title": "ミラコスタ空室検知", "Priority": "urgent", "Tags": "hotel,disney" },
-    body: message
+  const user = process.env.MAIL_USERNAME;
+  const pass = process.env.MAIL_PASSWORD;
+  const to = process.env.MAIL_TO;
+  if (!user || !pass || !to) throw new Error("Gmail secrets are not configured.");
+  const transporter = nodemailer.createTransport({
+    host: "smtp.gmail.com",
+    port: 465,
+    secure: true,
+    auth: { user, pass }
   });
-  if (!response.ok) throw new Error("ntfy notification failed: HTTP " + response.status);
+  await transporter.sendMail({
+    from: user,
+    to,
+    subject: "ミラコスタ空室検知",
+    text: message
+  });
 }
 
 async function main() {
-  const browser = await chromium.launch({ headless: true });
-  const context = await browser.newContext({ locale: "ja-JP", timezoneId: "Asia/Tokyo", viewport: { width: 1440, height: 1200 } });
+  const browser = await chromium.launch({
+    headless: true,
+    args: ["--disable-blink-features=AutomationControlled", "--no-sandbox"]
+  });
+  const context = await browser.newContext({
+    locale: "ja-JP",
+    timezoneId: "Asia/Tokyo",
+    viewport: { width: 1440, height: 1200 },
+    userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36"
+  });
   const page = await context.newPage();
-  try {
-    await page.goto(URL, { waitUntil: "domcontentloaded", timeout: 90000 });
-    await page.waitForLoadState("networkidle", { timeout: 60000 }).catch(() => {});
-    await page.waitForTimeout(5000);
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator, "webdriver", { get: () => false });
+  });
 
-    const bodyText = normalize(await page.locator("body").innerText());
-    if (!bodyText.includes("ホテルミラコスタ")) throw new Error("MiraCosta result was not found.");
+  try {
+    await page.goto(URL, { waitUntil: "commit", timeout: 120000 });
+    await page.waitForLoadState("domcontentloaded", { timeout: 120000 }).catch(() => {});
+    await page.waitForTimeout(10000);
+
+    const bodyText = normalize(await page.locator("body").innerText().catch(() => ""));
+    if (!bodyText.includes("ホテルミラコスタ")) {
+      throw new Error("MiraCosta result was not found. Page title: " + await page.title());
+    }
     if (!bodyText.includes(TARGET_LABEL)) throw new Error("Porto Paradiso Side section was not found.");
 
     const sectionText = await page.evaluate((label) => {
@@ -64,7 +83,7 @@ async function main() {
     }, null, 2));
 
     if (available) {
-      await notify("東京ディズニーシー・ホテルミラコスタ\\nポルト・パラディーゾ・サイドに空室候補を検知しました。\\n日付: 2027/1/17\\n人数: 大人2名・子供2名（1歳・7歳）\\n\\n予約は自動実行していません。公式サイトで確認してください。");
+      await notify("東京ディズニーシー・ホテルミラコスタ\nポルト・パラディーゾ・サイドに空室候補を検知しました。\n日付: 2027/1/17\n人数: 大人2名・子供2名（1歳・7歳）\n\n予約は自動実行していません。公式サイトで確認してください。");
     }
   } finally {
     await browser.close();
